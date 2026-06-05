@@ -1,7 +1,7 @@
 ---
 name: daily-briefing
 description: "Set up and manage daily automated briefing jobs — cron-powered data collection from multiple sources (GitHub, ArXiv, Hacker News, RSS, APIs) with structured summarization and timed delivery."
-version: 2.0.0
+version: 2.3.0
 author: Hermes Agent
 license: MIT
 category: devops
@@ -87,13 +87,21 @@ Provide a fill-in-the-blanks template the agent should populate. Include fallbac
 
 Instead of relying on framework-level delivery (which has no retry logic), have the agent deliver the content itself via the `send_message` tool, with retry for rate limits, and end with `[SILENT]` to prevent the framework from double-delivering:
 
+**Feishu delivery (primary):** Exactly 3 bare messages in order. No extra text on any of them.
 ```markdown
-生成日报后，使用 send_message 工具将其投递到指定平台（target: "origin" 或具体平台名）。
-如果投递失败（报错含 "rate limited"），等待30秒后重试，最多重试3次。
-投递成功后，输出 [SILENT] 以结束。
+send_message(target="feishu", message="DOC_URL")
+send_message(target="feishu", message="TITLE")
+send_message(target="feishu", message="MEDIA:/tmp/daily_cover.png")
 ```
 
-This pattern is especially important for **WeChat (Weixin)** which has low per-minute rate limits. Without it, a transient rate-limit error silently drops the report — the cron job's output status is "ok" but the user never sees it.
+**WeChat delivery (fallback):** Split into 2 messages with retry delay. Title first, then body + cover.
+```markdown
+send_message(target="weixin", message="AI 科技日报 | 主题 · 日期")
+# wait 30+ seconds
+send_message(target="weixin", message="MEDIA:{cover_path}\n\n━━━\n\n📌 Focus section\n\n🔥 GitHub section\n\n💬 HN section\n\n📝 Editorial section\n\n数据来源: ...")
+```
+
+If delivery fails (rate limited), wait 60s and retry up to 3 times. On success, end with `[SILENT]`.
 
 ## Common Data Sources & Their API Commands
 
@@ -142,14 +150,52 @@ for item_id in ids:
         if item and item.get('title') and item.get('type') == 'story':
             t = item['title']
             if any(k in t.lower() for k in kw):
-                print(f'🗞️ {t} (score:{item.get(\"score\",0)})')
+                print(f'🗞️ {t} (score:{item.get(\\\"score\\\",0)})')
                 print()
     except:
         pass
+\"
+```
+
+### 🇨🇳 雷锋网AI频道 (Domestic — Verified Working 2026.06.05)
+
+Delivers AI-focused tech news from Chinese sources. Covers deep-tech AI research, industry applications, and academic conferences.
+
+```bash
+curl -sL --max-time 12 "https://www.leiphone.com/category/ai" | python3 -c "
+import sys, re
+html = sys.stdin.read()
+titles = re.findall(r'<h3[^>]*>(.*?)</h3>', html, re.DOTALL)
+for i, t in enumerate(titles[:10]):
+    t2 = re.sub(r'<[^>]+>', '', t).strip()
+    if len(t2) > 5:
+        print(f'{i+1}. {t2}')
 "
 ```
 
-## Settled Format (User-Verified, v2.2 — Do Not Change Without Approval)
+Fallback: if empty or timeout, skip without affecting other sources.
+
+### 🇨🇳 IT之家AI标签 (Domestic — Verified Working 2026.06.05)
+
+Real-time AI product/industry news. Covers OpenAI, Apple, Meta, and domestic AI product launches and updates.
+
+```bash
+curl -sL --max-time 10 "https://www.ithome.com/tag/ai" | python3 -c "
+import sys, re
+html = sys.stdin.read()
+titles = re.findall(r'<h2[^>]*>(.*?)</h2>', html, re.DOTALL)
+for i, t in enumerate(titles[:10]):
+    t2 = re.sub(r'<[^>]+>', '', t).strip()
+    if len(t2) > 5:
+        print(f'{i+1}. {t2}')
+"
+```
+
+Fallback: if empty or timeout, skip without affecting other sources.
+
+**Note:** Other Chinese sources tested but failed due to JS rendering or anti-scraping: 36氪 search API (blocked), 量子位 (JS), 虎嗅AI (JS), 澎湃AI (no AI content), 中国科技网 (no parseable content). Do not retry these unless the site structure changes.
+
+## Settled Format
 
 **CRITICAL: This format was validated through multiple iterations with user corrections. Do NOT merge sections, rename headings, or change block structure without explicit approval. Breaking validated format causes user frustration.**
 
@@ -169,7 +215,7 @@ Title: `今日AI简报 | {keyword1} · {keyword2} | {YYYY.MM.DD}`
 | 📝 Editorial | 1-2 paragraphs | Deep analysis connecting threads |
 
 - **No** 💡 Daily Interaction section (removed per user request)
-- **Data sources:** Include both domestic (36氪, 雷锋网) and international (GitHub, HN, ArXiv), mixed together — do NOT prioritize one over the other
+- **Data sources:** Include both domestic (雷锋网, IT之家) and international (GitHub, HN, ArXiv), mixed together — do NOT prioritize one over the other
 - **Rotate:** If many hot topics, pick ~2 and let the rest surface naturally in subsequent days
 - **Style:** Narrative deep analysis, each item has independent angle, not a feed dump
 - **No** "Hermes Agent" branding anywhere
@@ -223,16 +269,16 @@ Hermes generates → sends to user's WeChat → user saves cover + pastes body i
 
 If the user asks about full automation, explain the limitation and recommend this workflow. See `references/wechat-account-setup.md` for account type comparison, registration flow, and API permission details.
 
-### 7. Script-Skill Format Drift
+### 5. Script-Skill Format Drift
 
 If the briefing is generated via a standalone Python script (e.g. `/root/create_daily_briefing_doc.py`), that script can silently diverge from the skill's format rules. Every time the skill's format table or rules change, **check and update the script** too. The script is the actual implementation — the skill doc is the spec. They must match.
 
 Common drifts seen in production:
 - Script merges 🔥 GitHub 头部项目 + 🔥 新锐项目 into a single "GitHub 项目" section (always use two separate H2 headings with SP() divider between them)
-- Script uses `\u01c0` (renders as ǀ) instead of `🔥` for heat indicators — both in tech news AND community section (HN scores like "594🔥")
+- Script uses `\\u01c0` (renders as ǀ) instead of `🔥` for heat indicators — both in tech news AND community section (HN scores like "594🔥")
 - Script includes a "数据来源: ..." footer that was previously removed from the spec
 - Script has 1-sentence entries where the spec says 2-3 sentences
-- Script uses double-quoted Python strings `P("...")` when content contains Chinese curly quotes `""` — causes SyntaxError. Fix: use single-quote Python strings `P('...')` with `\"` for Chinese quotes
+- Script uses double-quoted Python strings `P("...")` when content contains Chinese curly quotes `""` — causes SyntaxError. Fix: use single-quote Python strings `P('...')` with `\\"` for Chinese quotes
 
 When regenerating, always verify the output matches the format table below, not what the script happened to produce last time.
 Cron agents work best with structured prompts that clearly separate "steps" from "format" from "rules". Use markdown headings to break it up.
@@ -248,6 +294,38 @@ When searching for new/rising AI repos, `q=created:>$DATE+AND+(ai+OR+agent+OR+LL
 - Use the expanded AI keyword list from the skill's HN section to broaden the query
 - If only 1 new project is found, that's acceptable — do NOT pad with old projects
 
+### 8. Feishu 3-Message Delivery: No Extra Text
+
+For Feishu delivery (the primary channel for this user), send exactly 3 bare messages with zero additional text:
+1. `send_message(target="feishu", message="DOC_URL")` — just the URL
+2. `send_message(target="feishu", message="TITLE")` — just the title
+3. `send_message(target="feishu", message="MEDIA:/tmp/daily_cover.png")` — just the cover
+
+**Do NOT** add any prefix, emoji, explanation, greeting, or punctuation to any of these 3 messages. The user was explicit: "不要任何无关的信息". No "日报链接：", no "完整日报：", no "📄", no "⬇️ 封面", no "标题：".
+
+**Why 3 separate messages:** The user deliberately requested this split. Sending everything in one message or adding explanatory text violates their settled preference. If you're unsure, err on the side of fewer characters — a bare URL for message 1, bare title for message 2, bare MEDIA: for message 3, and nothing else.
+
+### 9. 🇨🇳 Domestic Source Collection — Provide Exact Commands, Let Model Decide
+
+When including Chinese/domestic news sources in a briefing prompt, follow these rules:
+
+**DO:**
+- Provide exact curl commands with Python parse snippets (same as international sources)
+- Mark domestic sources as optional (failure is acceptable, skip if empty)
+- Let the model decide whether to include domestic items based on value and importance
+- Test each proposed source before adding it to a cron prompt — many Chinese tech sites use JS rendering
+
+**DON'T:**
+- Say "跳过或简单搜索" — this gives the agent an excuse to skip all domestic collection
+- Add hard requirements like "must include ≥1 domestic item" — the user explicitly rejected this
+- Assume 36氪 works — its search API was tested and blocked by anti-scraping measures
+
+**Tested Chinese sources for AI news (as of 2026.06):**
+- ✅ 雷锋网AI频道 (leiphone.com/category/ai) — works, curl + h3 title scrape
+- ✅ IT之家AI标签 (ithome.com/tag/ai) — works, curl + h2 title scrape
+- ❌ 36氪 search API — blocked
+- ❌ 量子位 / 虎嗅AI / 澎湃AI — JS rendering or no AI content
+
 ## Testing a Briefing Job
 
 1. Create the job with `cronjob(action='create', ...)`
@@ -261,11 +339,33 @@ When searching for new/rising AI repos, `q=created:>$DATE+AND+(ai+OR+agent+OR+LL
 
 This skill includes several reference files and scripts:
 
+### 📡 Data Collection Scripts (`scripts/`)
+
+These Python scripts fetch headlines from each source independently:
+
+| Script | Source | Method |
+|--------|--------|--------|
+| `fetch-github-head.py` | GitHub high-star AI repos | Search API |
+| `fetch-github-rising.py` | GitHub low-star active repos | Search API + filter |
+| `fetch-hackernews.py` | Hacker News AI stories | Firebase API + keyword filter |
+| `fetch-techcrunch.py` | TechCrunch homepage | HTML scrape (h2/h3) |
+| `fetch-leiphone.py` | 雷锋网AI频道 | HTML scrape (h3) |
+| `fetch-ithome.py` | IT之家AI标签 | HTML scrape (h2) |
+
+**`collect-all.sh`** — Run all 6 fetchers sequentially and combine output:
+```bash
+bash ~/.hermes/skills/devops/daily-briefing/scripts/collect-all.sh
+```
+Each script exits 1 on failure and `collect-all.sh` continues anyway, so one broken source won't block the rest. The combined output is a clean text feed the AI agent can read and select from.
+
+### Other Assets
+
 - **`templates/ai-daily-briefing-prompt.md`** — Full AI news briefing cron prompt template with exact curl commands, parse snippets, error handling, and output format. Load with `skill_view('daily-briefing', 'templates/ai-daily-briefing-prompt.md')` and adapt.
 - **`references/wechat-official-account-format.md`** — Complete formatting guide, template, and workflow for publishing daily briefings to WeChat Official Account (个人订阅号). Includes cover image workflow, title format, section structure, and publishing instructions.
 - **`references/wechat-account-setup.md`** — WeChat Official Account registration guide: type comparison (personal vs enterprise), registration flow, naming advice, avatar design tips, and API permission limitations.
 - **`references/feishu-doc-briefing-api.md`** — Working API sequence and Python template for creating Feishu doc briefings. Covers auth, block types, batching rules, and common failure modes.
-- **`scripts/generate-cover.py`** — Self-contained Python script to generate a 1200×630 cover image (Pillow + Noto Sans CJK + DejaVu). Dark navy gradient, "监听站1379" title (user's 公众号 name), "DAILY BRIEFING" tagline, date, up to 5 headlines, decorative dots, no data source footer. Run via `python3 generate-cover.py --date "..." --headlines "h1|h2|h3|h4|h5" --output out.png`.
+- **scripts/generate-cover.py** — Self-contained Python script to generate a 1200×630 cover image (Pillow + Noto Sans CJK + DejaVu). Dark navy gradient, "监听站1379" title (user's 公众号 name), "DAILY BRIEFING" tagline, date, up to 5 headlines, decorative dots, no data source footer. Run via `python3 generate-cover.py --date "..." --headlines "h1|h2|h3|h4|h5" --output out.png`.
+- **GitHub repo** — Full briefing system assets (skill, scripts, references, templates) are tracked at `github.com/liusheng/daily-briefing`. Push updates there when the cron prompt, script, or format rules change.
 
 ## Related Skills
 
@@ -273,27 +373,32 @@ This skill includes several reference files and scripts:
 
 ## Feishu Doc Delivery + Cover Image Workflow
 
-### Dual Delivery: Doc + Message
+### Feishu Delivery: 3 Bare Messages (verified 2026.06.05)
 
-Per user request (settled June 2026), the daily briefing workflow is:
+**CRITICAL: The user requires exactly 3 separate `send_message` calls with NO extra text on any of them. No explanations, prefixes, emoji, greetings, or punctuation. Each message is exactly one thing — bare.**
+
+Per user request (settled 2026.06.05), the daily briefing workflow is:
 
 1. **Generate Feishu doc** — write structured content via `/root/create_daily_briefing_doc.py`
 2. **Extract TITLE** — script outputs `TITLE:今日AI简报 | ...` and `DOC_URL:https://...`
 3. **Generate cover image** — use `scripts/generate-cover.py` with up to 5 headlines
-4. **Send separate message** to user with: title text + MEDIA:cover + doc link
+4. **Send exactly 3 messages, in this order, each with nothing else:**
 
 ```python
-# Example: cover generation + messaging
-cover_path = "/tmp/daily_cover.png"
-subprocess.run(["python3",
-    os.path.expanduser("~/.hermes/skills/devops/daily-briefing/scripts/generate-cover.py"),
-    "--date", cn_date_str,
-    "--headlines", "|".join(headlines[:5]),
-    "--output", cover_path])
-# Then: send_message(target="origin", message=f"{title}\n\nMEDIA:{cover_path}\n\n📄 完整日报：{doc_url}")
+# Message 1: doc link only (no prefix, no emoji)
+send_message(target="feishu", message=doc_url)
+
+# Message 2: title text only (no prefix, no emoji)
+send_message(target="feishu", message=title)
+
+# Message 3: cover image only (no caption, no prefix)
+send_message(target="feishu", message=f"MEDIA:{cover_path}")
 ```
 
+If any send fails (rate limited), wait 60s and retry up to 3 times. Output `[SILENT]` after all 3 are sent.
+
 The cover script produces 1200×630 PNG, no data source footer, title reads "监听站1379".
+Full briefing system assets mirrored at `github.com/liusheng/daily-briefing`.
 
 ### Format Rules (User-Verified) — 精确计数版
 
@@ -309,7 +414,7 @@ The cover script produces 1200×630 PNG, no data source footer, title reads "监
 | 📝 最新论文 | **0-1条** | 不重要跳过 |
 | 💬 社区热议 | **0-2条** | 有好内容才放 |
 - **标题:** `今日AI简报 | {关键词1} · {关键词2} | {YYYY.MM.DD}`
-- **数据源:** 国内外兼顾(36氪, 雷锋网, GitHub, HN, ArXiv), 不优先任何一方
+- **数据源:** 国内外兼顾(雷锋网, IT之家, GitHub, HN, ArXiv), 不优先任何一方
 - **岔开发:** 热门多则只选2条, 剩下的自然在后续出现
 - **去掉**"今日互动"板块
 - **去掉**底部"数据来源: ..."行 — 文档中不使用数据来源标注
@@ -449,6 +554,7 @@ See `references/wechat-official-account-format.md` for the complete template and
 - [ ] Each data source has parse instructions (Python snippet)
 - [ ] Output template has fallback text for empty sections
 - [ ] Timezone conversion is correct (UTC vs local)
-- [ ] Prompt includes `send_message` with retry + `[SILENT]` delivery pattern (Section 6)
+- [ ] Prompt includes `send_message` with retry + `[SILENT]` delivery pattern (Section 6 of Cron Prompt guide)
 - [ ] [SILENT] instruction included for total-failure case
 - [ ] Skills that might help (e.g. arxiv) are listed in the cron job's skills parameter
+- [ ] Feishu delivery uses exactly 3 bare messages: doc URL | title | MEDIA:cover — no extra text on any

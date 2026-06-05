@@ -1,7 +1,7 @@
 ---
 name: daily-briefing
-description: "Set up and manage daily automated briefing jobs — cron-powered data collection from multiple sources (GitHub, ArXiv, Hacker News, RSS, APIs) with structured summarization and timed delivery."
-version: 2.3.0
+description: "Daily AI briefing pipeline — cron-powered 4-stage workflow: 6-source data collection (GitHub, HN, TechCrunch, 雷锋网, IT之家), Feishu doc generation, cover image, and 3-bare-message delivery."
+version: 3.0.0
 author: Hermes Agent
 license: MIT
 category: devops
@@ -21,17 +21,156 @@ Set up recurring cron jobs that collect data from multiple external sources and 
 - User wants recurring automated data collection + summarization
 - You are about to create a cron job for a periodic news/digest/briefing task
 
+---
+
+## System Architecture & Workflow
+
+The daily briefing is a **pipeline** with 4 stages, orchestrated by a cron job. Here's the full execution flow:
+
+```
+┌─────────────────────────────────────────────────────┐
+│ CRON JOB: 3b93814c9436                              │
+│ Schedule: 0 7 * * * (UTC) = 15:00 Beijing           │
+│ Skills loaded: daily-briefing, feishu-doc-api        │
+│ Prompt: feishu-doc-briefing-prompt.md template       │
+└──────────────┬──────────────────────────────────────┘
+               │ triggers at scheduled time
+               ▼
+┌─────────────────────────────────────────────────────┐
+│ STAGE 1: DATA COLLECTION                            │
+│ Runs: collect-all.sh                                │
+│ Fires 6 Python fetchers in parallel:                │
+│   ├─ fetch-github-head.py     → GitHub 头部 ⭐      │
+│   ├─ fetch-github-rising.py   → GitHub 新锐         │
+│   ├─ fetch-hackernews.py      → Hacker News AI 热帖 │
+│   ├─ fetch-techcrunch.py      → TechCrunch 首页     │
+│   ├─ fetch-leiphone.py        → 雷锋网 AI 频道      │
+│   └─ fetch-ithome.py          → IT之家 AI 标签      │
+│ Each source failure is isolated — one broken        │
+│ source never blocks the rest.                       │
+└──────────────┬──────────────────────────────────────┘
+               │ raw headlines + metadata feed
+               ▼
+┌─────────────────────────────────────────────────────┐
+│ STAGE 2: CONTENT GENERATION                         │
+│ Agent reads collected data, selects 6-8 items,      │
+│ writes editorial analysis, updates and runs:         │
+│ /root/create_daily_briefing_doc.py                  │
+│ → Creates Feishu doc with structured blocks         │
+│ → Outputs: DOC_URL + TITLE lines                    │
+└──────────────┬──────────────────────────────────────┘
+               │ DOC_URL, TITLE, selected headlines
+               ▼
+┌─────────────────────────────────────────────────────┐
+│ STAGE 3: COVER GENERATION                           │
+│ Runs: scripts/generate-cover.py                     │
+│ → 1200×630 PNG, dark navy gradient                  │
+│ → Title: "监听站1379", subtitle: "DAILY BRIEFING"   │
+│ → Up to 5 headlines + date                          │
+└──────────────┬──────────────────────────────────────┘
+               │ /tmp/daily_cover.png
+               ▼
+┌─────────────────────────────────────────────────────┐
+│ STAGE 4: DELIVERY                                   │
+│ Exactly 3 send_message calls (no extra text):       │
+│   1. DOC_URL (bare link)                            │
+│   2. TITLE (bare title text)                        │
+│   3. MEDIA:/tmp/daily_cover.png (bare cover)         │
+│ Retry on rate limit: 60s wait × 3                   │
+│ End with [SILENT]                                   │
+└─────────────────────────────────────────────────────┘
+```
+
+**Key files and their roles:**
+
+| File | Role | Location |
+|------|------|----------|
+| Cron prompt | Orchestration script (the 4-stage instructions) | `templates/feishu-doc-briefing-prompt.md` |
+| `collect-all.sh` | Runs all 6 data fetchers, aggregates output | `scripts/collect-all.sh` |
+| `fetch-*.py` (×6) | One per data source, scrapes/API-calls, prints headlines | `scripts/` |
+| `create_daily_briefing_doc.py` | Takes collected data → writes Feishu doc via API | `/root/create_daily_briefing_doc.py` |
+| `generate-cover.py` | Generates daily cover image | `scripts/generate-cover.py` |
+| SKILL.md | This document — spec, format rules, reference | `devops/daily-briefing/SKILL.md` |
+
+**⚠️ Data sources are defined in TWO places — keep them in sync:**
+1. `scripts/collect-all.sh` — the actual execution (determines what gets fetched)
+2. SKILL.md → Data Sources section below — the documentation (must match)
+
+When adding a new source, update BOTH. When removing a source, update BOTH.
+
 ## Quick Reference
 
 | Step | Action |
 |------|--------|
-| Create | `cronjob(action='create', name='...', schedule='0 1 * * *', prompt='...', skills=['...'])` |
-| Update | `cronjob(action='update', job_id='...', prompt='...')` |
-| Test | `cronjob(action='run', job_id='...')` then read output from `~/.hermes/cron/output/<job_id>/` |
-| List | `cronjob(action='list')` |
-| Remove | `cronjob(action='remove', job_id='...')` |
+| List jobs | `cronjob(action='list')` |
+| Test run | `cronjob(action='run', job_id='3b93814c9436')` → check `~/.hermes/cron/output/<job_id>/` |
+| Update prompt | Edit `templates/feishu-doc-briefing-prompt.md`, then `cronjob(action='update', job_id='...', prompt='<new prompt>')` |
+| Add/remove source | Update both `scripts/collect-all.sh` AND the Data Sources section below |
+| Create new job | `cronjob(action='create', name='...', schedule='0 1 * * *', prompt='...', skills=['daily-briefing', 'feishu-doc-api'])` |
+| Remove job | `cronjob(action='remove', job_id='...')` |
 
-## Timezone Handling
+## Data Sources
+
+The briefing collects from **6 sources** via independent Python fetchers orchestrated by `collect-all.sh`. Each source runs in isolation — one failure never blocks the rest.
+
+### Active Sources (matching collect-all.sh)
+
+| # | Source | Script | Method | Category |
+|---|--------|--------|--------|----------|
+| 1 | **GitHub 头部项目** | `fetch-github-head.py` | Search API → high-star AI repos (⭐>) | 代码/开源 |
+| 2 | **GitHub 新锐项目** | `fetch-github-rising.py` | Search API → emerging repos (<30k ⭐) | 代码/开源 |
+| 3 | **Hacker News** | `fetch-hackernews.py` | Firebase API → AI keyword filter (min score ≥30) | 社区讨论 |
+| 4 | **TechCrunch** | `fetch-techcrunch.py` | HTML scrape → h2/h3 headlines | 国际科技媒体 |
+| 5 | **雷锋网 AI 频道** | `fetch-leiphone.py` | HTML scrape → h3 titles (leiphone.com/category/ai) | 国内科技媒体 |
+| 6 | **IT之家 AI 标签** | `fetch-ithome.py` | HTML scrape → h2 titles (ithome.com/tag/ai) | 国内科技媒体 |
+
+**The model (AI agent) decides final selection** — not all fetched headlines make it into the briefing. Quality > quantity: 6-8 items total across all sections. The agent reads the combined output and picks the most interesting/important items, mixing domestic and international sources freely.
+
+### Adding a New Source
+
+Two-file change required (keep them in sync):
+
+1. **Create the fetcher script** at `scripts/fetch-<source>.py`
+   - Accept no arguments, print headlines to stdout, exit 0 on success
+   - On failure: print error to stderr, exit 1
+   - Template pattern: see any existing fetcher (urllib + regex, ~30 lines)
+
+2. **Register in `collect-all.sh`** — add an entry to the `sources` array:
+   ```bash
+   sources=(
+       ...
+       "新源名称:fetch-newsource.py"
+   )
+   ```
+
+3. **Update this section** — add a row to the Active Sources table above
+
+4. **Update the cron prompt template** at `templates/feishu-doc-briefing-prompt.md` — mention the new source in the Step 1 script description
+
+### Source Failure Behavior
+
+- Each fetcher exits 1 on failure (timeout, parse error, empty results)
+- `collect-all.sh` captures failures and continues to the next source
+- The model runs with whatever data is available
+- If ALL sources fail → output `[SILENT]` (no delivery, no noise)
+
+### Tested Sources That DON'T Work (do not retry)
+
+| Source | Why Failed |
+|--------|-----------|
+| 36氪 search API | Anti-scraping block |
+| 量子位 (jiqizhixin) | JS rendering required |
+| 虎嗅AI | JS rendering required |
+| 澎湃AI | No AI-specific content feed |
+| 中国科技网 | No parseable article structure |
+
+---
+
+## Creating New Briefing Jobs
+
+This section covers how to build a new cron job for a briefing — useful when setting up a fresh pipeline or creating a variant for a different topic/target.
+
+### Timezone Handling
 
 The Hermes cron daemon runs in **UTC**. To schedule at the user's local time, convert:
 
@@ -43,423 +182,279 @@ The Hermes cron daemon runs in **UTC**. To schedule at the user's local time, co
 
 **Rule:** `0 H * * *` where H = (local_hour - UTC_offset) in 0-23. For Beijing (UTC+8): `0 1 * * *` = 9 AM local.
 
-## Designing a Self-Contained Cron Prompt
+### Cron Prompt Design Principles
 
-Cron jobs run in **isolated sessions** with no conversation history. The prompt must be fully self-contained. Critical design principles:
+Cron jobs run in **isolated sessions** with no conversation history. The prompt must be fully self-contained.
 
-### 1. Be Explicit About Error Handling
-
+**1. Be explicit about error handling:**
 ```markdown
-⚠️ **所有API调用设置 max-time 10-15秒超时，超时或失败则跳过。只要至少有一个数据源成功就生成报告，全部失败才输出 [SILENT]。**
+⚠️ All API calls: 10-15s timeout. Skip on failure. Generate report if ≥1 source works. [SILENT] if all fail.
 ```
 
-### 2. Provide Exact curl Commands
+**2. Use scripts, not inline curl (preferred approach):**
+For the current implementation, data collection is done via Python scripts run through `collect-all.sh`. This is cleaner than inline curl commands buried in a cron prompt. The scripts handle timeouts, error isolation, and output formatting. When building a new briefing, prefer this pattern.
 
-Don't say "fetch GitHub trending" — say exactly how:
+If scripts aren't practical (one-off, simple source), provide exact curl commands with parse snippets.
 
+**3. Define the exact output format:**
+Provide a fill-in template the agent populates. Include fallback text for empty sections.
+
+**4. Delivery via `send_message` with retry + `[SILENT]`:**
 ```markdown
-curl -s --max-time 12 "https://api.github.com/search/repositories?q=ai+OR+machine+learning&sort=stars&order=desc&per_page=6"
+If delivery fails (rate limited), wait 60s and retry up to 3 times.
+On success, end with [SILENT] to prevent framework double-delivery.
 ```
 
-### 3. Include Parse Instructions
+### Data Source Reference (Raw API Commands)
 
-Each data source should include a Python one-liner or snippet to parse the response into readable text. Cron agents have Python + stdlib available.
+These are the raw API/curl equivalents of what the Python fetcher scripts do. Kept for reference when debugging a broken script or adding a source without writing a full Python fetcher.
 
-### 4. Specify Fallback Behavior Per Section
-
-```markdown
-If this source fails, skip it and continue. The final report should still include whatever sections have data.
-```
-
-### 5. Define the Exact Output Template
-
-Provide a fill-in-the-blanks template the agent should populate. Include fallback text for empty sections:
-
-```markdown
-**🔥 重点趋势**
-(如果有足够数据就写洞察, 否则写"暂无突出趋势")
-
-**📄 最新论文**
-(如果API失败则跳过此节)
-```
-
-### 6. Use `send_message` with Retry + `[SILENT]`
-
-Instead of relying on framework-level delivery (which has no retry logic), have the agent deliver the content itself via the `send_message` tool, with retry for rate limits, and end with `[SILENT]` to prevent the framework from double-delivering:
-
-**Feishu delivery (primary):** Exactly 3 bare messages in order. No extra text on any of them.
-```markdown
-send_message(target="feishu", message="DOC_URL")
-send_message(target="feishu", message="TITLE")
-send_message(target="feishu", message="MEDIA:/tmp/daily_cover.png")
-```
-
-**WeChat delivery (fallback):** Split into 2 messages with retry delay. Title first, then body + cover.
-```markdown
-send_message(target="weixin", message="AI 科技日报 | 主题 · 日期")
-# wait 30+ seconds
-send_message(target="weixin", message="MEDIA:{cover_path}\n\n━━━\n\n📌 Focus section\n\n🔥 GitHub section\n\n💬 HN section\n\n📝 Editorial section\n\n数据来源: ...")
-```
-
-If delivery fails (rate limited), wait 60s and retry up to 3 times. On success, end with `[SILENT]`.
-
-## Common Data Sources & Their API Commands
-
-### GitHub Trending (Most Reliable)
+<details>
+<summary>GitHub Trending (Search API)</summary>
 
 ```bash
-curl -s --max-time 12 "https://api.github.com/search/repositories?q=ai+OR+machine+learning+OR+LLM&sort=stars&order=desc&per_page=6"
+curl -s --max-time 12 "https://api.github.com/search/repositories?q=ai+OR+machine+learning+OR+LLM&sort=stars&order=desc&per_page=5"
 ```
+→ Fetcher: `fetch-github-head.py`
+</details>
 
-Parse with:
-```python
-import sys, json
-data = json.load(sys.stdin)
-for repo in data.get('items', [])[:6]:
-    desc = (repo.get('description') or 'No description')[:80]
-    print(f"🔥 {repo['full_name']} ⭐{repo['stargazers_count']}★ — {desc} ({repo.get('language') or 'N/A'})")
-```
-
-### GitHub New Projects (Past Week)
+<details>
+<summary>GitHub Rising (New/Active, <30k stars)</summary>
 
 ```bash
-curl -s --max-time 10 "https://api.github.com/search/repositories?q=created:>$DATE+AND+(ai+OR+llm+OR+machine+learning)&sort=stars&order=desc&per_page=3"
+curl -s --max-time 10 "https://api.github.com/search/repositories?q=ai+OR+agent+OR+LLM&sort=stars&order=desc&per_page=10"
 ```
+→ Fetcher: `fetch-github-rising.py` (API + post-filter)
+</details>
 
-Where `$DATE` = `$(date -d '7 days ago' +%Y-%m-%d)`
-
-### ArXiv Latest Papers
+<details>
+<summary>Hacker News (Firebase API)</summary>
 
 ```bash
-curl -s --max-time 12 "https://export.arxiv.org/api/query?search_query=cat:cs.AI+OR+cat:cs.CL+OR+cat:cs.LG&sortBy=submittedDate&sortOrder=descending&max_results=5"
+curl -s --max-time 8 "https://hacker-news.firebaseio.com/v0/topstories.json"
 ```
+→ Fetcher: `fetch-hackernews.py` (fetches top 30, filters by AI keywords, min score 30)
+</details>
 
-Parse with XML library (stdlib). Note: ArXiv API is slow and may time out — always set `--max-time 12`.
-
-### Hacker News AI Stories
+<details>
+<summary>TechCrunch (Homepage scrape)</summary>
 
 ```bash
-curl -s --max-time 8 "https://hacker-news.firebaseio.com/v0/topstories.json" | python3 -c "
-import sys, json, urllib.request
-ids = json.load(sys.stdin)[:30]
-kw = ['ai','llm','gpt','chatgpt','openai','anthropic','claude','gemini','deepseek','machine learning','neural','transformer','rag','agent','copilot','qwen','mistral','llama','stable diffusion','sora','gen ai']
-for item_id in ids:
-    try:
-        req = urllib.request.Request(f'https://hacker-news.firebaseio.com/v0/item/{item_id}.json', headers={'User-Agent': 'Mozilla/5.0'})
-        item = json.loads(urllib.request.urlopen(req, timeout=4).read())
-        if item and item.get('title') and item.get('type') == 'story':
-            t = item['title']
-            if any(k in t.lower() for k in kw):
-                print(f'🗞️ {t} (score:{item.get(\\\"score\\\",0)})')
-                print()
-    except:
-        pass
-\"
+curl -sL --max-time 12 -H "User-Agent: Mozilla/5.0" "https://techcrunch.com/"
 ```
+→ Fetcher: `fetch-techcrunch.py` (extracts h2/h3, HTML entity decode, top 8)
+</details>
 
-### 🇨🇳 雷锋网AI频道 (Domestic — Verified Working 2026.06.05)
-
-Delivers AI-focused tech news from Chinese sources. Covers deep-tech AI research, industry applications, and academic conferences.
+<details>
+<summary>雷锋网 AI 频道 (h3 scrape)</summary>
 
 ```bash
-curl -sL --max-time 12 "https://www.leiphone.com/category/ai" | python3 -c "
-import sys, re
-html = sys.stdin.read()
-titles = re.findall(r'<h3[^>]*>(.*?)</h3>', html, re.DOTALL)
-for i, t in enumerate(titles[:10]):
-    t2 = re.sub(r'<[^>]+>', '', t).strip()
-    if len(t2) > 5:
-        print(f'{i+1}. {t2}')
-"
+curl -sL --max-time 12 "https://www.leiphone.com/category/ai"
 ```
+→ Fetcher: `fetch-leiphone.py`
+</details>
 
-Fallback: if empty or timeout, skip without affecting other sources.
-
-### 🇨🇳 IT之家AI标签 (Domestic — Verified Working 2026.06.05)
-
-Real-time AI product/industry news. Covers OpenAI, Apple, Meta, and domestic AI product launches and updates.
+<details>
+<summary>IT之家 AI 标签 (h2 scrape)</summary>
 
 ```bash
-curl -sL --max-time 10 "https://www.ithome.com/tag/ai" | python3 -c "
-import sys, re
-html = sys.stdin.read()
-titles = re.findall(r'<h2[^>]*>(.*?)</h2>', html, re.DOTALL)
-for i, t in enumerate(titles[:10]):
-    t2 = re.sub(r'<[^>]+>', '', t).strip()
-    if len(t2) > 5:
-        print(f'{i+1}. {t2}')
-"
+curl -sL --max-time 10 "https://www.ithome.com/tag/ai"
 ```
+→ Fetcher: `fetch-ithome.py`
+</details>
 
-Fallback: if empty or timeout, skip without affecting other sources.
+### 🇨🇳 Domestic Source Guidelines
 
-**Note:** Other Chinese sources tested but failed due to JS rendering or anti-scraping: 36氪 search API (blocked), 量子位 (JS), 虎嗅AI (JS), 澎湃AI (no AI content), 中国科技网 (no parseable content). Do not retry these unless the site structure changes.
+When including Chinese/domestic news sources in a briefing:
 
-## Settled Format
+**DO:**
+- Provide Python fetcher scripts (same pattern as international sources)
+- Mark domestic sources as optional (skip if no value)
+- Let the model decide inclusion based on merit
+- Test each new source before adding to production
 
-**CRITICAL: This format was validated through multiple iterations with user corrections. Do NOT merge sections, rename headings, or change block structure without explicit approval. Breaking validated format causes user frustration.**
+**DON'T:**
+- Say "跳过或简单搜索" — gives the agent an excuse to skip
+- Add hard requirements like "must include ≥1 domestic item"
+- Assume a source works without testing (many Chinese tech sites use JS rendering)
 
-Title: `今日AI简报 | {keyword1} · {keyword2} | {YYYY.MM.DD}`
+---
+
+## Content Format Rules
+
+**⚠️ VALIDATED FORMAT — do not modify without user approval.** This format was settled through multiple correction iterations. Changing sections, headings, or structure causes user frustration.
+
+### Title
+
+`今日AI简报 | {关键词1} · {关键词2} | {YYYY.MM.DD}`
+
+### Section Structure (fixed order)
 
 **Total: 6-8 items.** One core focus per day. Quality over quantity.
 
-| Section | Count | Notes |
-|---------|:-----:|-------|
-| Opening paragraph | 1 | Narrative, day's core trend |
-| ▸ Key points preview | **2** | Bold keywords + one-liner |
-| 🔥 Technology AI News | **2** | Domestic + international mixed, **no prioritization** |
-| 🔥 GitHub Head Projects | **1-2** | High-star headliners — **keep SEPARATE from 新锐** |
-| 🔥 Rising Projects | **2** | Emerging low-star projects — **keep SEPARATE from 头部** |
-| 📝 Latest Papers | **0-1** | Skip if uninteresting |
-| 💬 Community Hot Discussion | **0-2** | Only if good content exists |
-| 📝 Editorial | 1-2 paragraphs | Deep analysis connecting threads |
+| # | Section | Count | Rules |
+|---|---------|:-----:|-------|
+| 1 | 开场总述 | 1段 | Narrative, day's core trend |
+| 2 | ▸ 要点预览 | **2** | Bold keywords + one-liner each |
+| 3 | 🔥 科技圈AI动态 | **2** | Domestic + international mixed, no source priority |
+| 4 | 🔥 GitHub 头部项目 | **1-2** | High-star repos — **KEEP SEPARATE from 新锐** |
+| 5 | 🔥 新锐项目 | **2** | Emerging repos — **KEEP SEPARATE from 头部** |
+| 6 | 💬 社区热议 | **0-2** | Only if good HN/TechCrunch content |
+| 7 | 📝 编辑点评 | 1-2段 | Deep analysis, connecting threads |
 
-- **No** 💡 Daily Interaction section (removed per user request)
-- **Data sources:** Include both domestic (雷锋网, IT之家) and international (GitHub, HN, ArXiv), mixed together — do NOT prioritize one over the other
-- **Rotate:** If many hot topics, pick ~2 and let the rest surface naturally in subsequent days
-- **Style:** Narrative deep analysis, each item has independent angle, not a feed dump
-- **No** "Hermes Agent" branding anywhere
+### Non-Negotiable Rules
+
+| Rule | Detail |
+|------|--------|
+| **No section merging** | 头部项目 and 新锐项目 MUST be separate sections |
+| **No 今日互动** | This section was removed per user request |
+| **No 数据来源 footer** | No "数据来源：..." line at the bottom of the doc |
+| **Heat indicator** | Must use `🔥` (U+1F525), NOT `\u01c0` (renders as ǀ) |
+| **Entry length** | 2-3 sentences per item (not 1, not 4+) |
+| **Quote handling** | Use single-quote Python strings when content has Chinese `""` quotes |
+| **Style** | Narrative analysis, each item has independent angle, not a feed dump |
+| **Rotation** | Hot topics: pick ~2, let the rest surface on subsequent days |
+| **No branding** | Never add "Hermes Agent" branding |
+| **Platform-independent** | Format is the same whether delivering to Feishu doc or WeChat |
+
+---
+
+## Delivery Rules
+
+### Feishu (Primary — Active)
+
+Exactly **3 bare `send_message` calls**, in this order, with zero additional text on any of them:
+
+```
+1. send_message(target="feishu", message="DOC_URL")
+2. send_message(target="feishu", message="TITLE")
+3. send_message(target="feishu", message="MEDIA:/tmp/daily_cover.png")
+```
+
+**No prefixes, no emoji, no explanations, no greetings, no punctuation.** The user said: "不要任何无关的信息".
+
+If any send fails (rate limited): wait 60s, retry up to 3 times. End with `[SILENT]`.
+
+### WeChat (Fallback)
+
+Personal subscription accounts (个人订阅号) cannot auto-publish via API. Workflow:
+
+```
+Hermes generates → sends to user's WeChat → user pastes in 微信公众平台 App (~30s/day)
+```
+
+Delivery: split into 2 messages with 30-90s delay. Title (no emoji) first, then MEDIA:cover + body. See `references/wechat-official-account-format.md` for full template.
+
+### [SILENT] Protocol
+
+- **All sources fail** → output `[SILENT]`, no delivery attempted
+- **Delivery succeeds after retry** → output `[SILENT]` (prevents framework double-delivery)
+- **Delivery fails after 3 retries** → output `[SILENT]`, check `~/.hermes/cron/output/<job_id>/` for saved content
+
+---
 
 ## Common Pitfalls
 
-### 0. CRITICAL: Never Merge or Rename Established Sections
-The user's briefing format was validated through multiple iterations. **Do NOT merge "头部项目" and "新锐项目" into a single "GitHub Projects" section** — they are intentionally separate. Similarly, do not rename sections, add/remove sections, or change the block structure without explicit user approval. Breaking a validated format causes user frustration and requires re-iteration. 
-If you think a structural change would improve the format, propose it first rather than making it unilaterally.
+### P1: Data Source Mismatch (Script vs Skill Doc)
+**Symptom:** `collect-all.sh` fetches sources not listed in SKILL.md, or SKILL.md documents sources not in the script.
+**Fix:** When adding/removing a source, update BOTH `scripts/collect-all.sh` AND the Data Sources section above. The Data Sources section is the authoritative list — scripts are the implementation.
 
-Switching delivery channel (WeChat → Feishu doc) must NOT change the content format. The format is platform-independent.
+### P2: Merging 头部项目 + 新锐项目 Sections
+**Symptom:** Briefing has a single "GitHub Projects" section instead of two separate ones.
+**Fix:** These are intentionally separate. Always use two H2 headings with SP() divider between them.
 
-### 1. Agent Produces "Done" Without Content
-If the cron job agent just says "日报已生成并发送！✅" or similar without actual report content, the prompt was too vague. Fix: provide exact data-fetching commands, parse instructions, and output templates.
+### P3: Script-Skill Format Drift
+**Symptom:** `/root/create_daily_briefing_doc.py` output doesn't match the Format Rules table.
+**Fix:** Every time format rules change, update the script. The skill is the spec, the script is the implementation. Verified drift patterns:
+- `\u01c0` instead of `🔥` for heat indicators
+- "数据来源" footer sneaking back in
+- 1-sentence entries where 2-3 required
+- Double-quoted P("...") strings breaking on Chinese `""` quotes → use P('...')
 
-### 2. API Timeouts
-External APIs (ArXiv, HN) frequently time out in cron sessions. Always use `--max-time` on curl and provide fallback sections in the output template.
-### 3. WeChat Delivery Rate Limiting
+### P4: Feishu Delivery Has Extra Text
+**Symptom:** Messages include prefixes like "日报链接：" or "完整日报：".
+**Fix:** 3 bare messages. Nothing else. The user was explicit about this.
 
-Some platforms (especially WeChat/Weixin) have low per-minute rate limits. If the framework-level delivery fails with `rate limited`, the report is silently dropped — the cron status says "ok" but the user sees nothing.
+### P5: Empty GitHub Rising Results
+**Symptom:** `q=created:>$DATE+AND+(ai+OR+agent+OR+LLM)` returns 0 results.
+**Fix:** Broad search without date filter + post-filter by star count and activity. Or scrape GitHub trending directly. 1 result is acceptable — don't pad.
 
-**Root cause:** WeChat's per-minute rate limit typically allows only 1–2 messages through. If the agent tries to send content as 3+ separate messages (cover image, then text part 1, then text part 2, etc.), **messages 3+ will be blocked** and stay blocked even with 30–60s retries.
+### P6: Agent Produces "Done" Without Content
+**Symptom:** Cron output is "日报已生成！✅" with no actual content.
+**Fix:** The prompt template already includes explicit data collection + format instructions. If this happens, the agent didn't follow the template — check the cron output file for what actually happened.
 
-**Critical nuance — prior messages consume the window:** If the current conversation already sent 2–3 messages (including other non-briefing messages) before delivery, the rate limit window may already be saturated. In that case, wait **90s+** before the first retry, not the usual 30s.
-
-**Fix (two parts):**
-
-**Part A — Split into title + body (2 messages):**
-Send the title (NO emoji, pure text) as the first `send_message` call. Send the body (MEDIA:cover + all content) as the second `send_message` call, with at least **30s** pause between them:
-```markdown
-send_message(target="weixin", message="AI 科技日报 | 主题 · 日期")
-# wait 30+ seconds
-send_message(target="weixin", message="MEDIA:{cover_path}\\n\\n━━━\\n\\n📌 Focus section\\n\\n🔥 GitHub section\\n\\n💬 HN section\\n\\n📝 Editorial section\\n\\n数据来源: ...")
-```
-If other messages were sent earlier in this conversation, wait **60–90s** between the title and body instead.
-
-Body must use ASCII digits (1. 2. 3.), `->` arrows (not →), no markdown syntax, no Unicode special chars that cause editor spacing issues. Body ends at data source footer — NO publishing guide appended.
-
-**Part B — Retry with `[SILENT]` as safety net (see Section 6):**
-If a message fails with `rate limited`, wait 60s (not 30s) and retry up to 3 times. On success, end with `[SILENT]` to prevent framework-level double-delivery. On total failure after 3 retries, still output `[SILENT]` — the user won't get the message but the agent doesn't loop forever.
-
-Test runs: if a test delivery fails from rate limiting, check the saved output at `~/.hermes/cron/output/<job_id>/` and show the user the content directly in the chat (don't keep hammering the platform).
-
-### 4. WeChat Account Limitations
-
-Personal subscription accounts (个人订阅号) **cannot auto-publish** via API — they lack `draft/free_publish` endpoints. Playwright browser automation is risky (cookie expiry 1–7 days, captcha/风控 triggers). The recommended semi-automated workflow is:
-
-```
-Hermes generates → sends to user's WeChat → user saves cover + pastes body in 微信公众平台 App (~30s/day)
-```
-
-If the user asks about full automation, explain the limitation and recommend this workflow. See `references/wechat-account-setup.md` for account type comparison, registration flow, and API permission details.
-
-### 5. Script-Skill Format Drift
-
-If the briefing is generated via a standalone Python script (e.g. `/root/create_daily_briefing_doc.py`), that script can silently diverge from the skill's format rules. Every time the skill's format table or rules change, **check and update the script** too. The script is the actual implementation — the skill doc is the spec. They must match.
-
-Common drifts seen in production:
-- Script merges 🔥 GitHub 头部项目 + 🔥 新锐项目 into a single "GitHub 项目" section (always use two separate H2 headings with SP() divider between them)
-- Script uses `\\u01c0` (renders as ǀ) instead of `🔥` for heat indicators — both in tech news AND community section (HN scores like "594🔥")
-- Script includes a "数据来源: ..." footer that was previously removed from the spec
-- Script has 1-sentence entries where the spec says 2-3 sentences
-- Script uses double-quoted Python strings `P("...")` when content contains Chinese curly quotes `""` — causes SyntaxError. Fix: use single-quote Python strings `P('...')` with `\\"` for Chinese quotes
-
-When regenerating, always verify the output matches the format table below, not what the script happened to produce last time.
-Cron agents work best with structured prompts that clearly separate "steps" from "format" from "rules". Use markdown headings to break it up.
-
-### 6. Missing [SILENT] Handling
-If there's genuinely nothing to report (all sources failed), the agent should output exactly `[SILENT]` to suppress delivery. Include this instruction explicitly.
-
-### 7. GitHub New Projects API Returns Empty
-When searching for new/rising AI repos, `q=created:>$DATE+AND+(ai+OR+agent+OR+LLM)` often returns 0 results even when trending repos exist. Fallback strategies:
-
-- Remove the date filter and search broadly: `q=ai+OR+agent+OR+LLM&sort=stars&order=desc&per_page=10`, then filter results to repos under 30k stars that are recently active
-- Scrape GitHub trending page directly: `curl -sL "https://github.com/trending/python?since=daily"` and extract repo links
-- Use the expanded AI keyword list from the skill's HN section to broaden the query
-- If only 1 new project is found, that's acceptable — do NOT pad with old projects
-
-### 8. Feishu 3-Message Delivery: No Extra Text
-
-For Feishu delivery (the primary channel for this user), send exactly 3 bare messages with zero additional text:
-1. `send_message(target="feishu", message="DOC_URL")` — just the URL
-2. `send_message(target="feishu", message="TITLE")` — just the title
-3. `send_message(target="feishu", message="MEDIA:/tmp/daily_cover.png")` — just the cover
-
-**Do NOT** add any prefix, emoji, explanation, greeting, or punctuation to any of these 3 messages. The user was explicit: "不要任何无关的信息". No "日报链接：", no "完整日报：", no "📄", no "⬇️ 封面", no "标题：".
-
-**Why 3 separate messages:** The user deliberately requested this split. Sending everything in one message or adding explanatory text violates their settled preference. If you're unsure, err on the side of fewer characters — a bare URL for message 1, bare title for message 2, bare MEDIA: for message 3, and nothing else.
-
-### 9. 🇨🇳 Domestic Source Collection — Provide Exact Commands, Let Model Decide
-
-When including Chinese/domestic news sources in a briefing prompt, follow these rules:
-
-**DO:**
-- Provide exact curl commands with Python parse snippets (same as international sources)
-- Mark domestic sources as optional (failure is acceptable, skip if empty)
-- Let the model decide whether to include domestic items based on value and importance
-- Test each proposed source before adding it to a cron prompt — many Chinese tech sites use JS rendering
-
-**DON'T:**
-- Say "跳过或简单搜索" — this gives the agent an excuse to skip all domestic collection
-- Add hard requirements like "must include ≥1 domestic item" — the user explicitly rejected this
-- Assume 36氪 works — its search API was tested and blocked by anti-scraping measures
-
-**Tested Chinese sources for AI news (as of 2026.06):**
-- ✅ 雷锋网AI频道 (leiphone.com/category/ai) — works, curl + h3 title scrape
-- ✅ IT之家AI标签 (ithome.com/tag/ai) — works, curl + h2 title scrape
-- ❌ 36氪 search API — blocked
-- ❌ 量子位 / 虎嗅AI / 澎湃AI — JS rendering or no AI content
+### P7: WeChat Rate Limiting
+**Symptom:** Messages 3+ silently blocked.
+**Fix:** For WeChat, use 2-message split. If prior messages were sent, wait 90s+ between sends. Body uses ASCII digits + `->` arrows, no markdown, no Unicode special chars.
 
 ## Testing a Briefing Job
 
-1. Create the job with `cronjob(action='create', ...)`
-2. Test with `cronjob(action='run', job_id='...')`
-3. Check output at `~/.hermes/cron/output/<job_id>/<timestamp>.md`
-4. Look for actual content in the "## Response" section at the end of the file
-5. If the response is empty, meta-only, or says "done" without data — **the prompt needs more structure**
-6. Iterate: update the prompt with `cronjob(action='update', job_id='...', prompt='...')`, then re-run
+1. Test with `cronjob(action='run', job_id='<id>')`
+2. Check output at `~/.hermes/cron/output/<job_id>/<timestamp>.md` — look for the "## Response" section
+3. If response is empty or says "done" without content, the prompt needs more structure
 
-## Reference Templates & Assets
+---
 
-This skill includes several reference files and scripts:
+## Reference: Templates & Assets
 
-### 📡 Data Collection Scripts (`scripts/`)
+### Cron Prompt Templates
 
-These Python scripts fetch headlines from each source independently:
+| File | Status | Description |
+|------|--------|-------------|
+| `templates/feishu-doc-briefing-prompt.md` | **Canonical** (v2.3) | Uses collect-all.sh, 6 sources, 3-bare-message Feishu delivery |
+| `templates/ai-daily-briefing-prompt.md` | Legacy | Inline curl commands, old delivery format. Kept for reference. |
 
-| Script | Source | Method |
-|--------|--------|--------|
-| `fetch-github-head.py` | GitHub high-star AI repos | Search API |
-| `fetch-github-rising.py` | GitHub low-star active repos | Search API + filter |
-| `fetch-hackernews.py` | Hacker News AI stories | Firebase API + keyword filter |
-| `fetch-techcrunch.py` | TechCrunch homepage | HTML scrape (h2/h3) |
-| `fetch-leiphone.py` | 雷锋网AI频道 | HTML scrape (h3) |
-| `fetch-ithome.py` | IT之家AI标签 | HTML scrape (h2) |
+### Reference Docs
 
-**`collect-all.sh`** — Run all 6 fetchers sequentially and combine output:
-```bash
-bash ~/.hermes/skills/devops/daily-briefing/scripts/collect-all.sh
-```
-Each script exits 1 on failure and `collect-all.sh` continues anyway, so one broken source won't block the rest. The combined output is a clean text feed the AI agent can read and select from.
+| File | Content |
+|------|---------| 
+| `references/feishu-doc-briefing-api.md` | Feishu doc creation API: auth, block types, batching, failure modes |
+| `references/feishu-color-reference.md` | Complete tested color table for Feishu text_color |
+| `references/wechat-official-account-format.md` | WeChat OA publishing template and formatting guide |
+| `references/wechat-account-setup.md` | WeChat OA registration: type comparison, API permissions |
 
-### Other Assets
+### Scripts
 
-- **`templates/ai-daily-briefing-prompt.md`** — Full AI news briefing cron prompt template with exact curl commands, parse snippets, error handling, and output format. Load with `skill_view('daily-briefing', 'templates/ai-daily-briefing-prompt.md')` and adapt.
-- **`references/wechat-official-account-format.md`** — Complete formatting guide, template, and workflow for publishing daily briefings to WeChat Official Account (个人订阅号). Includes cover image workflow, title format, section structure, and publishing instructions.
-- **`references/wechat-account-setup.md`** — WeChat Official Account registration guide: type comparison (personal vs enterprise), registration flow, naming advice, avatar design tips, and API permission limitations.
-- **`references/feishu-doc-briefing-api.md`** — Working API sequence and Python template for creating Feishu doc briefings. Covers auth, block types, batching rules, and common failure modes.
-- **scripts/generate-cover.py** — Self-contained Python script to generate a 1200×630 cover image (Pillow + Noto Sans CJK + DejaVu). Dark navy gradient, "监听站1379" title (user's 公众号 name), "DAILY BRIEFING" tagline, date, up to 5 headlines, decorative dots, no data source footer. Run via `python3 generate-cover.py --date "..." --headlines "h1|h2|h3|h4|h5" --output out.png`.
-- **GitHub repo** — Full briefing system assets (skill, scripts, references, templates) are tracked at `github.com/liusheng/daily-briefing`. Push updates there when the cron prompt, script, or format rules change.
+| File | Purpose |
+|------|---------|
+| `scripts/collect-all.sh` | Orchestrator — runs all 6 fetchers sequentially |
+| `scripts/fetch-github-head.py` | GitHub Search API → high-star AI repos |
+| `scripts/fetch-github-rising.py` | GitHub Search API → emerging repos (<30k ⭐) |
+| `scripts/fetch-hackernews.py` | HN Firebase API → AI keyword filter |
+| `scripts/fetch-techcrunch.py` | TechCrunch HTML scrape → h2/h3 headlines |
+| `scripts/fetch-leiphone.py` | 雷锋网 AI 频道 HTML scrape → h3 titles |
+| `scripts/fetch-ithome.py` | IT之家 AI 标签 HTML scrape → h2 titles |
+| `scripts/generate-cover.py` | 1200×630 PNG cover image (Pillow + Noto Sans CJK) |
 
-## Related Skills
+### External Files (outside skill dir, in active use)
 
-- **`feishu-doc-api`** — Create Feishu docs and write formatted content (text, headings, lists, rich text). Used for Format C (飞书文档版) briefing delivery.
+| File | Role |
+|------|------|
+| `/root/create_daily_briefing_doc.py` | Writes briefing content to Feishu doc via Open API |
 
-## Feishu Doc Delivery + Cover Image Workflow
+### GitHub Repo
 
-### Feishu Delivery: 3 Bare Messages (verified 2026.06.05)
+All assets tracked at `github.com/liusheng/daily-briefing`. Push updates when prompt, script, or format rules change.
 
-**CRITICAL: The user requires exactly 3 separate `send_message` calls with NO extra text on any of them. No explanations, prefixes, emoji, greetings, or punctuation. Each message is exactly one thing — bare.**
+---
 
-Per user request (settled 2026.06.05), the daily briefing workflow is:
+## Reference: Feishu API Quick Reference
 
-1. **Generate Feishu doc** — write structured content via `/root/create_daily_briefing_doc.py`
-2. **Extract TITLE** — script outputs `TITLE:今日AI简报 | ...` and `DOC_URL:https://...`
-3. **Generate cover image** — use `scripts/generate-cover.py` with up to 5 headlines
-4. **Send exactly 3 messages, in this order, each with nothing else:**
+Kept for the `create_daily_briefing_doc.py` script authoring.
 
-```python
-# Message 1: doc link only (no prefix, no emoji)
-send_message(target="feishu", message=doc_url)
-
-# Message 2: title text only (no prefix, no emoji)
-send_message(target="feishu", message=title)
-
-# Message 3: cover image only (no caption, no prefix)
-send_message(target="feishu", message=f"MEDIA:{cover_path}")
-```
-
-If any send fails (rate limited), wait 60s and retry up to 3 times. Output `[SILENT]` after all 3 are sent.
-
-The cover script produces 1200×630 PNG, no data source footer, title reads "监听站1379".
-Full briefing system assets mirrored at `github.com/liusheng/daily-briefing`.
-
-### Format Rules (User-Verified) — 精确计数版
-
-**核心原则:** 每天一个核心焦点角度, 总产量 **6-8条**, 宁缺毋滥, 岔开发。
-
-| 板块 | 数量 | 结构 |
-|------|:----:|------|
-| 开场总述 | 1段 | 当日核心焦点叙事 |
-| ▸ 要点预览 | **2条** | 加粗关键词 + 一句话 |
-| 🔥 科技圈AI动态 | **2条** | 国际+国内混排,不分来源,不优先 |
-| 🔥 GitHub 头部项目 | **1-2条** | 独立板块, 不合并 |
-| 🔥 新锐项目 | **2条** | 独立板块, 不合并 |
-| 📝 最新论文 | **0-1条** | 不重要跳过 |
-| 💬 社区热议 | **0-2条** | 有好内容才放 |
-- **标题:** `今日AI简报 | {关键词1} · {关键词2} | {YYYY.MM.DD}`
-- **数据源:** 国内外兼顾(雷锋网, IT之家, GitHub, HN, ArXiv), 不优先任何一方
-- **岔开发:** 热门多则只选2条, 剩下的自然在后续出现
-- **去掉**"今日互动"板块
-- **去掉**底部"数据来源: ..."行 — 文档中不使用数据来源标注
-- **热度标记:** 必须使用实际🔥（U+1F525）emoji，不要使用 `\u01c0`（渲染为竖线 ǀ）或其他替代字符 — 社区热议板块中也使用🔥表示HN热度（如"594🔥"）
-- **内容长度:** 每条正文 2-3 句，不要只有 1 句过短，也不要超过 4 句过长
-- **引号处理:** 使用中文引号时，Python字符串外层用单引号`'...'`避免与中文引号`"..."`冲突
-- **风格:** 叙事型深度分析, 每条有独立角度, 非信息堆砌
-- **不加** "Hermes Agent" 品牌标识
-
-### Workflow
-
-```
-Collect data (GitHub, HN, ArXiv)
-       |
-       ▼
-Generate briefing content as structured sections
-       |
-       ▼
-Create Feishu doc via Open API
-  - Get tenant_access_token
-  - POST /open-apis/docx/v1/documents
-  - POST .../blocks/{doc_id}/children (text, headings, lists, dividers)
-       |
-       ▼
-Deliver doc link via send_message
-       |
-       ▼
-User: open doc → copy → paste into WeChat OA App (≈20s)
-```
-
-### Supported Block Types
+### Block Types
 
 | Type | Value | Field |
 |------|:-----:|-------|
 | Text | 2 | text |
 | Heading 1 | 3 | heading1 |
-| Heading 2 | 4 | heading2 | ✅ supports text_color:5 (蓝色) + align |
+| Heading 2 | 4 | heading2 |
 | Heading 3 | 5 | heading3 |
 | Bullet | 12 | bullet |
 | Ordered | 13 | ordered |
 | Divider | 22 | divider |
 
-Rich text via `text_element_style`: bold, italic, inline_code.
-
-### Feishu text_color Mapping (Tested)
+### text_color Mapping
 
 | Value | Color |
 |:-----:|-------|
@@ -467,13 +462,11 @@ Rich text via `text_element_style`: bold, italic, inline_code.
 | 2 | Orange / Yellow |
 | 3 | Green |
 | 4 | Teal / Cyan |
-| **5** | **Blue** ✅ (use for section headings) |
+| **5** | **Blue** ✅ (section headings) |
 | 6 | Purple |
 | 7 | Pink |
 
-### H2 Helper — Blue Centered Heading
-
-Use `text_color=5` (blue) and `style.align=2` (center) on heading2 blocks:
+### H2 Helper
 
 ```python
 def H2(text):
@@ -483,78 +476,26 @@ def H2(text):
     }}
 ```
 
-See `references/feishu-color-reference.md` for the complete tested color table.
+---
 
-### Why Format C
+## Reference: WeChat OA Formatting Cheatsheet
 
-- Feishu renders headings, lists, and rich text properly (unlike WeChat's plain text)
-- User can copy-paste from Feishu doc to WeChat OA App
-- No rate limiting issues (one doc link = one message)
-- Doc URL is compact and shareable
-
-See `feishu-doc-api` skill for full API reference and code.
-
-## WeChat Official Account (公众号) Publishing
-
-For users who want to push daily briefings to a WeChat Official Account but only have a **personal subscription account** (no publish API), use this workflow:
-
-### Workflow
-
-```
-Hermes generates daily briefing (data + analysis)
-       │
-       ▼
-generate-cover.py ─────→ 1200×630 cover image (WeChat size)
-       │
-       ▼
-Format content per WeChat App template (see references/)
-       │
-       ▼
-Send to user's WeChat via send_message (MEDIA:cover.png + formatted text)
-       │
-       ▼
-User: save cover → open 微信公众平台 App → paste → publish (≈30s)
-```
-
-### Steps
-
-1. **Collect data** from GitHub, HN, ArXiv, etc. (standard daily-briefing process)
-2. **Generate cover image** using `scripts/generate-cover.py`:
-   ```python
-   import subprocess, os, datetime
-   script = os.path.expanduser("~/.hermes/skills/devops/daily-briefing/scripts/generate-cover.py")
-   out = f"/root/.hermes/audio_cache/cover_{datetime.date.today().isoformat()}.png"
-   # Build headlines from your data
-   headlines = "|".join([item1, item2, item3, item4])
-   subprocess.run(["python3", script, "--date", cn_date, "--headlines", headlines, "--output", out])
-   ```
-3. **Format content** per the template in `references/wechat-official-account-format.md`
-4. **Deliver** to user's WeChat: send title (no emoji) as first message, wait 30s+, then send MEDIA:cover + body as second message
-
-### Formatting Cheatsheet (WeChat Official Account)
+For the fallback WeChat delivery workflow (user copy-pastes from WeChat to 公众号 App).
 
 | Element | Rule |
 |---------|------|
 | Title | Pure text, NO emoji: `AI 科技日报 | {主题} · {YYYY年M月D日}` |
-| Section separators | `━━━` (Unicode box-drawing), repeated to full width |
-| Emoji per section | 📌 focus · 🔥 GitHub · 💬 discussion · 📝 editorial (body only, NOT title) |
-| Project numbering | ASCII digits: `1. 2. 3.` — do NOT use Unicode ordinals (𝟭. 𝟮.) which cause spacing issues |
-| Links | Full URL on its own line, prefixed with `-> ` (ASCII arrow, not →) |
-| Footer | Sources only: `数据来源: GitHub · Hacker News · ArXiv` — no generator credit |
-| Editorial header | Use `编辑点评` — never `小编点评` |
-| Account name | Adapt cover title + template headers to match user's public account name |
-| No Markdown | WeChat App editor strips it. No **bold**, no [links](url), plain text + emoji + Unicode separators only |
-| Body tail | Content ends at the data source footer line. NO publishing guide, no "三步发布", no instructions |
+| Section separators | `━━━` (Unicode box-drawing) |
+| Emoji (body) | 📌 focus · 🔥 GitHub · 💬 discussion · 📝 editorial |
+| Numbering | ASCII digits: `1. 2. 3.` (NOT Unicode ordinals) |
+| Links | `-> ` prefix (ASCII arrow, not →) |
+| Footer | `数据来源: GitHub · Hacker News · TechCrunch · 雷锋网 · IT之家` |
+| Editorial | `编辑点评` (never `小编点评`) |
+| No Markdown | WeChat App strips `**bold**`, `[links]`, etc. |
+| Body tail | Ends at data source footer. NO publishing instructions. |
 
-See `references/wechat-official-account-format.md` for the complete template and examples.
+---
 
-## Verification Checklist
+## Related Skills
 
-- [ ] All API calls have `--max-time N` (10-15 seconds)
-- [ ] Each data source has parse instructions (Python snippet)
-- [ ] Output template has fallback text for empty sections
-- [ ] Timezone conversion is correct (UTC vs local)
-- [ ] Prompt includes `send_message` with retry + `[SILENT]` delivery pattern (Section 6 of Cron Prompt guide)
-- [ ] [SILENT] instruction included for total-failure case
-- [ ] Skills that might help (e.g. arxiv) are listed in the cron job's skills parameter
-- [ ] Feishu delivery uses exactly 3 bare messages: doc URL | title | MEDIA:cover — no extra text on any
+- **`feishu-doc-api`** — Create Feishu docs and write formatted blocks. Used for the doc generation stage.

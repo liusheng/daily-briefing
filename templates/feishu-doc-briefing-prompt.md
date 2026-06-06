@@ -8,6 +8,8 @@ Uses collect-all.sh for data collection instead of inline curl.
 
 ⚠️ 如果所有数据源都失败，输出 [SILENT] 结束。否则至少有一个源可用就生成日报。
 
+🚨 最重要规则先写在最前：你的最终回复只能是 [SILENT] 这8个字符，前面不能有✅摘要、后面不能有DOC_URL。在 [SILENT] 旁边放任何东西都会导致整条消息被丢弃，日报发不出去。
+
 === Step 1: 数据采集 ===
 运行汇总脚本采集国内外AI动态：
 bash ~/.hermes/skills/devops/daily-briefing/scripts/collect-all.sh
@@ -65,10 +67,7 @@ python3 ~/.hermes/skills/devops/daily-briefing/scripts/generate-cover.py \
 
 如果任意发送失败（rate limited），等待60秒后重试，最多3次。
 
-⚠️ 3条 send_message 全部成功后，你的最终回复必须是且仅是：
-[SILENT]
-
-不要附带任何其他文字、报告摘要、emoji、或说明。就这8个字符 [SILENT]，别的什么都不要输出。如果你在 [SILENT] 前面或后面加了任何内容，系统会把整条消息丢弃，日报就发不出去。
+🚨 3条 send_message 全部成功后，立即终止回复。你只能输出 [SILENT] 这8个字符，一个字都不能多。不要输出 ✅ 日报流水线完成，不要输出 DOC_URL，不要输出 TITLE，不要输出封面路径，不要输出数据采集统计，不要输出日报条目数。任何非 [SILENT] 的内容都会导致系统丢弃整条响应，日报发不出去且用户收不到。
 
 【不要做】
 - 不要用\\u01c0代替🔥

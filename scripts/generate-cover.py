@@ -11,7 +11,7 @@ Defaults:
 
 Produces a 1200×630 PNG (WeChat recommended cover size) with:
 - Dark navy gradient background
-- "监听站1379" title + date
+- "每日AI简报" title + date
 - "DAILY BRIEFING" tagline top-left
 - Up to 5 headlines with bullet dots
 - Decorative dots + accent bars
@@ -71,7 +71,7 @@ def make_cover(date_str: str, headlines: list[str], output_path: str):
     draw.text((60, 95), "DAILY BRIEFING", fill=ACCENT, font=f_sub)
 
     # ── Title ──
-    draw.text((60, 145), "监听站1379", fill=WHITE, font=f_title)
+    draw.text((60, 145), "每日AI简报", fill=WHITE, font=f_title)
 
     # ── Date ──
     draw.text((60, 222), date_str, fill=GRAY, font=f_date)

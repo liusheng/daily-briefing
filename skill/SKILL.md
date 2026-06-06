@@ -65,7 +65,7 @@ The daily briefing is a **pipeline** with 4 stages, orchestrated by a cron job. 
 │ STAGE 3: COVER GENERATION                           │
 │ Runs: scripts/generate-cover.py                     │
 │ → 1200×630 PNG, dark navy gradient                  │
-│ → Title: "监听站1379", subtitle: "DAILY BRIEFING"   │
+│ → Title: "每日AI简报", subtitle: "DAILY BRIEFING"   │
 │ → Up to 5 headlines + date                          │
 └──────────────┬──────────────────────────────────────┘
                │ /tmp/daily_cover.png
@@ -351,6 +351,10 @@ Delivery: split into 2 messages with 30-90s delay. Title (no emoji) first, then 
 - **Delivery succeeds after retry** → output `[SILENT]` (prevents framework double-delivery)
 - **Delivery fails after 3 retries** → output `[SILENT]`, check `~/.hermes/cron/output/<job_id>/` for saved content
 
+**⚠️ CRITICAL — [SILENT] purity rule:** The cron framework enforces "Never combine [SILENT] with content." Your final response must be **exactly and only** `[SILENT]` — no report summary, no status line, no emoji, no explanation, not even a trailing newline with text. If any other content appears alongside `[SILENT]` in the same response, **the entire message is discarded and nothing is delivered**. This is the single most common cause of silent delivery failures in cron jobs.
+
+When the prompt instructs `send_message()` calls followed by `[SILENT]`, do the send calls first, then output pure `[SILENT]` as the final response. Do not output a confirmation summary like "日报生成完毕" — the send_message calls ARE the delivery.
+
 ---
 
 ## Common Pitfalls
@@ -386,6 +390,23 @@ Delivery: split into 2 messages with 30-90s delay. Title (no emoji) first, then 
 ### P7: WeChat Rate Limiting
 **Symptom:** Messages 3+ silently blocked.
 **Fix:** For WeChat, use 2-message split. If prior messages were sent, wait 90s+ between sends. Body uses ASCII digits + `->` arrows, no markdown, no Unicode special chars.
+
+### P8: [SILENT] Mixed With Content — Delivery Silently Suppressed
+**Symptom:** `last_status: "ok"`, output file shows a valid report + `[SILENT]` at the end, but nothing was delivered to the user.
+
+**Root cause:** The cron framework injects "Never combine [SILENT] with content." The agent output a full report summary (e.g. "日报生成完毕。DOC_URL: … TITLE: … 封面图: …") followed by `[SILENT]` in the same response. The framework sees content adjacent to `[SILENT]` → discards the entire response → nothing delivered.
+
+**Fix in prompt template (Step 4):** Be explicit that after all `send_message()` calls succeed, the final response must be **ONLY** `[SILENT]` — not even a single character of other text. The template should say something like:
+
+```
+⚠️ 3条 send_message 全部成功后，你的最终回复必须是且仅是：
+[SILENT]
+
+不要附带任何其他文字、报告摘要、emoji、或说明。就这8个字符 [SILENT]，别的什么都不要输出。
+如果你在 [SILENT] 前面或后面加了任何内容，系统会把整条消息丢弃，日报就发不出去。
+```
+
+**Verification:** Check the "## Response" section of the cron output file. If it contains anything other than just `[SILENT]` after the send_message calls, the prompt needs this fix.
 
 ## Testing a Briefing Job
 

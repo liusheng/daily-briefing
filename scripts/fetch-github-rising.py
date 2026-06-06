@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Fetch GitHub rising projects (low-star but active AI repos)."""
+"""Fetch GitHub rising projects (low-star but recently active AI repos)."""
 import json, urllib.request, sys
 
-URL = "https://api.github.com/search/repositories?q=ai+OR+agent+OR+LLM&sort=stars&order=desc&per_page=15"
+from datetime import datetime, timedelta
+
+week_ago = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
+URL = f"https://api.github.com/search/repositories?q=ai+OR+agent+OR+LLM+stars:100..10000+pushed:>{week_ago}&sort=stars&order=desc&per_page=15"
 req = urllib.request.Request(URL, headers={"User-Agent": "Hermes-DailyBriefing/1.0"})
 
 try:
     data = json.loads(urllib.request.urlopen(req, timeout=12).read())
     items = data.get("items", [])
-    # Filter: under 30k stars, recently updated
-    rising = [r for r in items if r["stargazers_count"] < 30000][:5]
+    rising = [r for r in items if 100 <= r["stargazers_count"] <= 10000][:5]
     print(f"=== GitHub RISING Projects ({len(rising)} repos) ===")
     for r in rising:
         desc = (r.get("description") or "No description")[:80]

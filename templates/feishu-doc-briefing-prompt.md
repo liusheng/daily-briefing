@@ -74,3 +74,5 @@ python3 ~/.hermes/skills/devops/daily-briefing/scripts/generate-cover.py \
 - 不要用"小编点评"（用"编辑点评"）
 - 不要在国内源上加硬性要求（模型自行判断价值）
 - 发送的3条消息不要加任何额外文字（前缀、emoji、问候语等）
+- 不要连续选同一个 GitHub 头部项目：先用 session_search 查近3天日报，避免重复选同一个 repo
+- 新锐项目板块不能为空：如果脚本返回0结果，尝试放宽查询条件重新抓取

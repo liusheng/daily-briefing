@@ -59,7 +59,11 @@ python3 ~/.hermes/skills/devops/daily-briefing/scripts/generate-cover.py \
 3. send_message(target="feishu", message="MEDIA:/tmp/daily_cover.png")
 
 如果任意发送失败（rate limited），等待60秒后重试，最多3次。
-输出 [SILENT] 结束
+
+⚠️ 3条 send_message 全部成功后，你的最终回复必须是且仅是：
+[SILENT]
+
+不要附带任何其他文字、报告摘要、emoji、或说明。就这8个字符 [SILENT]，别的什么都不要输出。如果你在 [SILENT] 前面或后面加了任何内容，系统会把整条消息丢弃，日报就发不出去。
 
 【不要做】
 - 不要合并 GitHub 头部项目 和 新锐项目 为一个板块

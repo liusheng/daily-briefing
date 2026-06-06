@@ -118,7 +118,7 @@ The briefing collects from **6 sources** via independent Python fetchers orchest
 | # | Source | Script | Method | Category |
 |---|--------|--------|--------|----------|
 | 1 | **GitHub 头部项目** | `fetch-github-head.py` | Search API → high-star AI repos (⭐>) | 代码/开源 |
-| 2 | **GitHub 新锐项目** | `fetch-github-rising.py` | Search API → emerging repos (<30k ⭐) | 代码/开源 |
+| 2 | **GitHub 新锐项目** | `fetch-github-rising.py` | Search API → `stars:100..10000 + pushed:>7d` (dynamic window, sort by stars) | 代码/开源 |
 | 3 | **Hacker News** | `fetch-hackernews.py` | Firebase API → AI keyword filter (min score ≥30) | 社区讨论 |
 | 4 | **TechCrunch** | `fetch-techcrunch.py` | HTML scrape → h2/h3 headlines | 国际科技媒体 |
 | 5 | **雷锋网 AI 频道** | `fetch-leiphone.py` | HTML scrape → h3 titles (leiphone.com/category/ai) | 国内科技媒体 |
@@ -199,10 +199,14 @@ If scripts aren't practical (one-off, simple source), provide exact curl command
 **3. Define the exact output format:**
 Provide a fill-in template the agent populates. Include fallback text for empty sections.
 
-**4. Delivery via `send_message` with retry + `[SILENT]`:**
+**4. Delivery via `send_message` with retry + pure `[SILENT]`:**
 ```markdown
-If delivery fails (rate limited), wait 60s and retry up to 3 times.
-On success, end with [SILENT] to prevent framework double-delivery.
+Use send_message() for all delivery calls.
+After all sends succeed, output ONLY [SILENT] (8 chars, nothing else).
+The cron framework enforces "Never combine [SILENT] with content" —
+if any text appears alongside [SILENT], the entire response is discarded.
+This is the #1 cause of silent delivery failures (see P8).
+If rate limited: wait 60s, retry up to 3 times.
 ```
 
 ### Data Source Reference (Raw API Commands)
@@ -219,12 +223,12 @@ curl -s --max-time 12 "https://api.github.com/search/repositories?q=ai+OR+machin
 </details>
 
 <details>
-<summary>GitHub Rising (New/Active, <30k stars)</summary>
+<summary>GitHub Rising (100–10k ⭐, pushed ≤7 days)</summary>
 
 ```bash
-curl -s --max-time 10 "https://api.github.com/search/repositories?q=ai+OR+agent+OR+LLM&sort=stars&order=desc&per_page=10"
+curl -s --max-time 12 "https://api.github.com/search/repositories?q=ai+OR+agent+OR+LLM+stars:100..10000+pushed:>2026-06-01&sort=stars&order=desc&per_page=15"
 ```
-→ Fetcher: `fetch-github-rising.py` (API + post-filter)
+→ Fetcher: `fetch-github-rising.py` (dynamic 7-day window via `datetime.utcnow() - timedelta(days=7)`)
 </details>
 
 <details>
@@ -290,23 +294,31 @@ When including Chinese/domestic news sources in a briefing:
 
 ### Section Structure (fixed order)
 
-**Total: 6-8 items.** One core focus per day. Quality over quantity.
+**Total: 7-9 items.** One core focus per day. Quality over quantity.
 
 | # | Section | Count | Rules |
 |---|---------|:-----:|-------|
 | 1 | 开场总述 | 1段 | Narrative, day's core trend |
 | 2 | ▸ 要点预览 | **2** | Bold keywords + one-liner each |
-| 3 | 🔥 科技圈AI动态 | **2** | Domestic + international mixed, no source priority |
-| 4 | 🔥 GitHub 头部项目 | **1-2** | High-star repos — **KEEP SEPARATE from 新锐** |
-| 5 | 🔥 新锐项目 | **2** | Emerging repos — **KEEP SEPARATE from 头部** |
-| 6 | 💬 社区热议 | **0-2** | Only if good HN/TechCrunch content |
-| 7 | 📝 编辑点评 | 1-2段 | Deep analysis, connecting threads |
+| 3 | 🔥 科技圈AI动态 | **2-3** | Domestic + international mixed, no source priority |
+| 4 | 🔥 GitHub 精选项目 | **2-3** | Rising projects (100~1万⭐, recent 7d) always eligible; head projects only if notable growth this week |
+| 5 | 💬 社区热议 | **1-2** | Only if good HN/TechCrunch content |
+| 6 | 📝 编辑点评 | 1-2段 | Deep analysis, connecting threads |
+
+### GitHub 精选项目 入选规则
+
+| 类型 | 条件 | 说明 |
+|------|------|------|
+| 新锐项目 | 100~10,000 ⭐ + 近7天有push | 常态入选，每次2个 |
+| 头部快速增长 | >10,000 ⭐ + 本周增长显著（>5%或绝对增长>500⭐） | 可选入选，最多1个 |
+| 头部老面孔 | 已在近3天日报中出现过的头部项目 | 跳过，不选 |
 
 ### Non-Negotiable Rules
 
 | Rule | Detail |
 |------|--------|
-| **No section merging** | 头部项目 and 新锐项目 MUST be separate sections |
+| **GitHub板块合并** | 头部和新锐统一为「🔥 GitHub 精选项目」，按入选规则筛选 |
+| **头部项目去重** | 先用 session_search 查近3天日报，避免重复选同一个头部 repo |
 | **No 今日互动** | This section was removed per user request |
 | **No 数据来源 footer** | No "数据来源：..." line at the bottom of the doc |
 | **Heat indicator** | Must use `🔥` (U+1F525), NOT `\u01c0` (renders as ǀ) |
@@ -380,8 +392,9 @@ When the prompt instructs `send_message()` calls followed by `[SILENT]`, do the 
 **Fix:** 3 bare messages. Nothing else. The user was explicit about this.
 
 ### P5: Empty GitHub Rising Results
-**Symptom:** `q=created:>$DATE+AND+(ai+OR+agent+OR+LLM)` returns 0 results.
-**Fix:** Broad search without date filter + post-filter by star count and activity. Or scrape GitHub trending directly. 1 result is acceptable — don't pad.
+**Symptom:** Rising fetcher returns 0 repos, rising section must be skipped.
+**Root cause:** Original query `sort=stars&order=desc` returns the same top-15 high-star repos as the head fetcher. The `<30k ⭐` post-filter eliminates everything because ALL of them are above 30k stars.
+**Fix (deployed 2026.06.06):** Changed query to `stars:100..10000+pushed:>{7d_ago}` with dynamic date calculation (`datetime.utcnow() - timedelta(days=7)`). This returns recently-active repos in the 100–10,000 star sweet spot. Sort by stars desc for quality. Always test the fetcher directly before assuming results are legit — 0-star repos from `sort=updated` are also wrong.
 
 ### P6: Agent Produces "Done" Without Content
 **Symptom:** Cron output is "日报已生成！✅" with no actual content.
@@ -390,6 +403,11 @@ When the prompt instructs `send_message()` calls followed by `[SILENT]`, do the 
 ### P7: WeChat Rate Limiting
 **Symptom:** Messages 3+ silently blocked.
 **Fix:** For WeChat, use 2-message split. If prior messages were sent, wait 90s+ between sends. Body uses ASCII digits + `->` arrows, no markdown, no Unicode special chars.
+
+### P9: Same Head Project Repeating Across Days
+**Symptom:** The same repo (e.g. `openclaw/openclaw`) appears in the 头部项目 section day after day. User frustration: "已经发了很多天了".
+**Root cause:** The head fetcher returns the top repos by stars, which changes slowly. The agent picks the first result without checking history.
+**Fix:** The cron prompt now instructs the agent to call `session_search` before selecting head projects to check what appeared in the last 2–3 days' briefings. Skip repos that were featured recently. The head fetcher returns 5 repos — there are always alternatives.
 
 ### P8: [SILENT] Mixed With Content — Delivery Silently Suppressed
 **Symptom:** `last_status: "ok"`, output file shows a valid report + `[SILENT]` at the end, but nothing was delivered to the user.
@@ -440,7 +458,7 @@ When the prompt instructs `send_message()` calls followed by `[SILENT]`, do the 
 |------|---------|
 | `scripts/collect-all.sh` | Orchestrator — runs all 6 fetchers sequentially |
 | `scripts/fetch-github-head.py` | GitHub Search API → high-star AI repos |
-| `scripts/fetch-github-rising.py` | GitHub Search API → emerging repos (<30k ⭐) |
+| `scripts/fetch-github-rising.py` | GitHub Search API → `stars:100..10000 + pushed:>7d`, sort by stars, dynamic 7-day window |
 | `scripts/fetch-hackernews.py` | HN Firebase API → AI keyword filter |
 | `scripts/fetch-techcrunch.py` | TechCrunch HTML scrape → h2/h3 headlines |
 | `scripts/fetch-leiphone.py` | 雷锋网 AI 频道 HTML scrape → h3 titles |

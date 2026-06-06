@@ -301,11 +301,11 @@ When including Chinese/domestic news sources in a briefing:
 | 1 | 开场总述 | 1段 | Narrative, day's core trend |
 | 2 | ▸ 要点预览 | **2** | Bold keywords + one-liner each |
 | 3 | 🔥 科技圈AI动态 | **2-3** | Domestic + international mixed, no source priority |
-| 4 | 🔥 GitHub 精选项目 | **2-3** | Rising projects (100~1万⭐, recent 7d) always eligible; head projects only if notable growth this week |
+| 4 | 🔥 GitHub 热门项目 | **2-3** | Rising projects (100~1万⭐, recent 7d) always eligible; head projects only if notable growth this week |
 | 5 | 💬 社区热议 | **1-2** | Only if good HN/TechCrunch content |
 | 6 | 📝 编辑点评 | 1-2段 | Deep analysis, connecting threads |
 
-### GitHub 精选项目 入选规则
+### GitHub 热门项目 入选规则
 
 | 类型 | 条件 | 说明 |
 |------|------|------|
@@ -317,7 +317,7 @@ When including Chinese/domestic news sources in a briefing:
 
 | Rule | Detail |
 |------|--------|
-| **GitHub板块合并** | 头部和新锐统一为「🔥 GitHub 精选项目」，按入选规则筛选 |
+| **GitHub板块合并** | 头部和新锐统一为「🔥 GitHub 热门项目」，按入选规则筛选 |
 | **头部项目去重** | 先用 session_search 查近3天日报，避免重复选同一个头部 repo |
 | **No 今日互动** | This section was removed per user request |
 | **No 数据来源 footer** | No "数据来源：..." line at the bottom of the doc |
